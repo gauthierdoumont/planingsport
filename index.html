@@ -1,7 +1,7 @@
 <!doctype html>
 <!--
   Planning Sport — coach muscu, cardio et mobilité personnalisé, 100 % hors ligne.
-  Créé par Gauthier Doumont — v1.0 (octobre 2026)
+  Créé par Gauthier Doumont — v1.1 (novembre 2026)
   HTML + CSS + JavaScript vanilla. Aucune librairie, aucune police web, aucun appel réseau.
 -->
 <html lang="fr" data-theme="dark">
@@ -191,6 +191,13 @@ body.full #toast{bottom:calc(96px + env(safe-area-inset-bottom))}
 .stat{background:var(--s2);border-radius:12px;padding:12px 6px;text-align:center}
 .stat b{display:block;font-size:20px;font-variant-numeric:tabular-nums}
 .stat span{font-size:12px;color:var(--mu)}
+/* Composition corporelle (balance impédancemètre) — Gauthier Doumont */
+button.stat{border:2px solid transparent;color:var(--tx);font:inherit;cursor:pointer;width:100%;min-height:48px}
+button.stat.on{border-color:var(--ac)}
+.stat i{display:block;font-style:normal;font-size:12px;font-weight:650;margin-top:2px}
+.compo-box{border:1px solid var(--line);border-radius:12px;padding:4px 12px 2px;margin:12px 0}
+.compo-box .row2{margin-top:4px}
+.compo-box label.fld{margin:0 0 8px;display:flex;flex-direction:column;justify-content:space-between}
 .pr{display:flex;gap:10px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
 .pr:first-child{border-top:0}
 .pr .ic{font-size:22px}
@@ -1315,7 +1322,7 @@ function blk(n, sec, kind, exId) { return { n, sec: Math.round(sec), kind, exId:
 
 /* ===== Planning Sport — logique de l'application. Créé par Gauthier Doumont ===== */
 'use strict';
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const DB_NAME = 'planning-sport-gd';
 const APP_ID = 'planning-sport-gd';
 const DB_VERSION = 1;        // version du schéma IndexedDB (stores)
@@ -1349,7 +1356,7 @@ const EX_FIELDS = ['n', 'm', 's', 'p', 'eq', 'lv', 't', 'u', 'load', 'f', 'c', '
 const DEFAULTS = {
   profile: { done: false, prenom: '', sexe: 'x', naissance: 0, taille: 0, poids: 0, poidsCible: 0, niveau: 1, activite: 'leger',
     objectifs: ['forme'], limites: [], duree: 40, dureeCardio: 30, dureeMob: 20, dispo: [true, false, true, false, true, false, false],
-    basket: false, basketJours: [], bilanJour: 6, theme: 'dark', son: true, vibration: true },
+    basket: false, basketJours: [], bilanJour: 6, compo: false, theme: 'dark', son: true, vibration: true },
   equipment: Object.fromEntries(EQUIP.map(q => [q.k, Object.assign({ on: !!q.fixed }, q.def || {})])),
   planning: ['muscu', 'repos', 'cardio', 'repos', 'muscu', 'repos', 'repos'],
   program: null,
@@ -1448,7 +1455,7 @@ const S = {
   tab: 'home', lib: [], libMap: new Map(), exRecords: [], sessions: [], bilans: [], active: null, preview: null, summary: null,
   home: { day: weekdayIdx(new Date()), tpl: null, mode: 'normal', dur: null, csub: null },
   libF: { q: '', p: '', m: '', mine: true, hidden: false },
-  ob: { step: 0 }, progTab: 'poids',
+  ob: { step: 0 }, progTab: 'poids', compoTab: null,
   rest: null, warm: null, chrono: null, wakeLock: null, audio: null, persistent: false
 };
 const saveKV = k => DB.put('kv', { k, v: S[k] });
@@ -2380,6 +2387,82 @@ function actSheet(act) {
 /* durée saisie : « 45 » = 45 min, « 1:15 » = 1 h 15 */
 const parseMin = v => { v = String(v || '').trim(); if (!v) return 0; if (/[:h]/.test(v)) { const p = v.split(/[:h]/).map(x => parseInt(x, 10) || 0); return p[0] * 60 + p[1]; } return Math.round(parseNum(v)); };
 
+/* ---------- Composition corporelle (balance impédancemètre, facultatif) — créé par Gauthier Doumont ----------
+   good : -1 = une baisse est favorable, +1 = une hausse est favorable, 0 = neutre.
+   pad / span : marges de la courbe (Progrès). */
+const COMPO = [
+  { k: 'graisse', n: 'Graisse corporelle', s: 'Graisse', u: '%', d: 1, min: 2, max: 75, good: -1, pad: 1, span: 4 },
+  { k: 'graisseSC', n: 'Graisse sous-cutanée', s: 'Sous-cutanée', u: '%', d: 1, min: 1, max: 70, good: -1, pad: 1, span: 4 },
+  { k: 'visc', n: 'Graisse viscérale', s: 'Viscérale', u: 'niv.', d: 1, min: 1, max: 60, good: -1, pad: 1, span: 4 },
+  { k: 'eau', n: 'Eau corporelle', s: 'Eau', u: '%', d: 1, min: 20, max: 85, good: 1, pad: 1, span: 4 },
+  { k: 'muscle', n: 'Masse musculaire', s: 'Muscle', u: 'kg', d: 1, min: 5, max: 150, good: 1, pad: 1, span: 4 },
+  { k: 'os', n: 'Masse osseuse', s: 'Os', u: 'kg', d: 1, min: 0.5, max: 10, good: 0, pad: 0.2, span: 1 },
+  { k: 'ageMeta', n: 'Âge métabolique', s: 'Âge métab.', u: 'ans', d: 0, min: 10, max: 110, good: -1, pad: 1, span: 4 }
+];
+const COMPO_MAP = Object.fromEntries(COMPO.map(c => [c.k, c]));
+const fmtCompo = (c, v) => fmtNum(v, c.d) + (c.u === 'niv.' ? '' : ' ' + c.u);
+const compoPts = k => S.bilans.filter(b => b.compo && b.compo[k] > 0);
+const lastCompo = (k, excludeId) => compoPts(k).filter(b => b.id !== excludeId).slice(-1)[0];
+const hasCompo = () => S.bilans.some(b => b.compo && Object.keys(b.compo).length);
+function compoMsgs(b, prevPoids) {
+  const c = b.compo, msgs = []; if (!c) return msgs;
+  const prev = k => { const p = lastCompo(k, b.id); return p && p.ts < b.ts ? p.compo[k] : 0; };
+  const dM = c.muscle && prev('muscle') ? c.muscle - prev('muscle') : null;
+  const dG = c.graisse && prev('graisse') ? c.graisse - prev('graisse') : null;
+  const dP = b.poids && prevPoids ? b.poids - prevPoids : null;
+  if (dM != null && dM <= -0.5 && (dP == null || dP < 0)) {
+    const cal = calories();
+    msgs.push(`Masse musculaire en baisse (${fmtNum(dM, 1)} kg) : garde toutes tes séances de muscu et vise le haut de ta fourchette de protéines${cal ? ` (${cal.prot[1]} g / jour)` : ''}. Si tu perds du poids vite, mange un peu plus.`);
+  } else if (dG != null && dG <= -0.5 && dM != null && dM >= 0) msgs.push(`Graisse ${fmtNum(dG, 1)} % et muscle maintenu ou en hausse : recomposition corporelle réussie, continue comme ça 💪`);
+  else if (dG != null && dP != null && Math.abs(dP) < 0.3 && dG <= -0.5) msgs.push('Le poids bouge peu mais ta graisse corporelle baisse : la balance classique ne dit pas tout, tu progresses.');
+  else if (dG != null && dG >= 1) msgs.push(`Graisse corporelle +${fmtNum(dG, 1)} % depuis la dernière mesure : vérifie ton alimentation et ton activité quotidienne (et mesure-toi toujours dans les mêmes conditions).`);
+  if (c.visc >= 13) msgs.push(`Graisse viscérale à ${fmtNum(c.visc, 1)} (au-dessus de 12, zone considérée comme élevée par la plupart des balances) : le cardio régulier, la muscu et l’alimentation sont les leviers les plus efficaces. Parles-en à ton médecin.`);
+  if (c.eau > 0) { const lo = S.profile.sexe === 'f' ? 45 : 50; if (c.eau < lo) msgs.push(`Eau corporelle basse (${fmtNum(c.eau, 1)} %) : bois régulièrement dans la journée. Cette mesure varie beaucoup selon l’heure, les repas et l’effort.`); }
+  if (c.ageMeta > 0 && S.profile.naissance) {
+    const ec = c.ageMeta - age();
+    if (ec >= 5) msgs.push(`Âge métabolique ${fmtNum(c.ageMeta, 0)} ans pour ${age()} ans réels : la muscu et l’activité régulière aident à le faire baisser.`);
+    else if (ec <= -3) msgs.push(`Âge métabolique ${fmtNum(c.ageMeta, 0)} ans, plus jeune que ton âge réel 👍`);
+  }
+  if (msgs.length) msgs.push('Rappel : une balance impédancemètre donne des estimations. Compare surtout l’évolution, mesurée le matin à jeun, dans les mêmes conditions.');
+  return msgs;
+}
+function compoPanel() {
+  const fld = c => { const l = lastCompo(c.k); return `<label class="fld"><span>${esc(c.n)} (${c.u === 'niv.' ? 'niveau' : c.u})${l ? `<br><span class="xs">dernier : ${fmtNum(l.compo[c.k], c.d)}</span>` : ''}</span><input type="text" inputmode="decimal" id="bc_${c.k}" placeholder="—" aria-label="${esc(c.n)}"></label>`; };
+  const rows = []; for (let i = 0; i < COMPO.length; i += 2) rows.push(`<div class="row2">${fld(COMPO[i])}${COMPO[i + 1] ? fld(COMPO[i + 1]) : ''}</div>`);
+  return `<div class="compo-box"><div class="ed-l">📊 Composition corporelle <span class="xs">(facultatif — remplis seulement ce que ta balance affiche)</span></div>${rows.join('')}</div>`;
+}
+function readCompo() {
+  const out = {};
+  for (const c of COMPO) {
+    const el = $('#bc_' + c.k); if (!el || !el.value.trim()) continue;
+    const v = parseNum(el.value);
+    if (!(v >= c.min && v <= c.max)) return { err: `${c.n} invalide (entre ${fmtNum(c.min, c.d)} et ${fmtNum(c.max, 0)})` };
+    out[c.k] = v;
+  }
+  return { compo: Object.keys(out).length ? out : null };
+}
+function compoChart(k) {
+  const c = COMPO_MAP[k], pts = compoPts(k).slice(-20);
+  if (pts.length < 2) return `<p class="empty sm">La courbe « ${esc(c.n)} » apparaîtra après 2 mesures.</p>`;
+  return lineChart(pts.map(b => ({ ts: b.ts, v: b.compo[k] })), { pad: c.pad, span: c.span, label: 'Évolution : ' + c.n });
+}
+function compoCard() {
+  if (!S.profile.compo && !hasCompo()) return '';
+  const have = COMPO.filter(c => compoPts(c.k).length);
+  if (!have.length) return `<div class="card"><h3>Composition corporelle</h3><p class="sm mu">Renseigne les mesures de ta balance lors de ton prochain bilan : elles apparaîtront ici avec leur évolution.</p></div>`;
+  const sel = have.some(c => c.k === S.compoTab) ? S.compoTab : have[0].k;
+  const tile = c => { const pts = compoPts(c.k), cur = pts[pts.length - 1].compo[c.k], pr = pts.length > 1 ? pts[pts.length - 2].compo[c.k] : null;
+    const d = pr == null ? null : Math.round((cur - pr) * 10 ** c.d) / 10 ** c.d;
+    const cls = d == null || !d || !c.good ? 'mu' : (d * c.good > 0 ? 'okc' : 'badc');
+    return `<button class="stat${c.k === sel ? ' on' : ''}" data-a="compoTab" data-k="${c.k}" aria-pressed="${c.k === sel}"><b>${fmtNum(cur, c.d)}</b><span>${esc(c.s)}${c.u === 'niv.' ? '' : ' (' + c.u + ')'}</span><i class="${cls}">${d == null ? '—' : (d > 0 ? '+' : '') + fmtNum(d, c.d)}</i></button>`; };
+  const last = S.bilans.filter(b => b.compo).slice(-1)[0];
+  return `<div class="card"><b>Composition corporelle</b>${last ? `<br><span class="xs mu">Dernière mesure : ${esc(fmtDate(last.ts, 'short'))}</span>` : ''}
+    <div class="stats">${have.map(tile).join('')}</div>
+    <p class="xs mu" style="margin-top:-4px">Écart depuis la mesure précédente (vert = dans le bon sens). Touche une mesure pour voir sa courbe.</p>
+    <div class="row sb" style="margin-top:6px"><b class="sm">${esc(COMPO_MAP[sel].n)}</b></div>${compoChart(sel)}
+    <p class="xs mu">Balance impédancemètre : valeurs estimées, utiles surtout pour suivre la tendance. Ce n’est pas un avis médical.</p></div>`;
+}
+
 /* ---------- Bilan hebdomadaire ---------- */
 function lastBilanDay() { const t = dayStart(Date.now()); const diff = (weekdayIdx(t) - (+S.profile.bilanJour || 0) + 7) % 7; const d = new Date(t); d.setDate(d.getDate() - diff); return d.getTime(); }
 function nextBilanDay() { const d = new Date(lastBilanDay()); d.setDate(d.getDate() + 7); return d.getTime(); }
@@ -2425,6 +2508,7 @@ function computeAdapt(b, st) {
       else if (d / weeks > prev.poids * 0.006) msgs.push('Prise de poids rapide : réduis un peu les portions pour limiter la prise de gras.');
     }
   }
+  if (b.compo) msgs.push(...compoMsgs(b, prev ? prev.poids : 0));
   if (levelUp) msgs.push('Tu progresses bien depuis plusieurs semaines : tu peux passer au niveau supérieur.');
   return { delta, lvl, bonus, msgs, levelUp };
 }
@@ -2435,6 +2519,7 @@ function bilanSheet() {
     <div class="stats"><div class="stat"><b>${st.days}/${st.planned}</b><span>Jours actifs</span></div><div class="stat"><b>${st.totalMin}</b><span>Minutes</span></div><div class="stat"><b>${st.cardioMin}</b><span>Min. cardio</span></div></div>
     <label class="fld"><span>Poids ce matin (kg)${last ? ` — dernier : ${fmtNum(last.poids, 1)} kg` : ''}</span><input type="text" inputmode="decimal" id="bPoids" value="${last ? fmtNum(last.poids, 1) : fmtNum(S.profile.poids, 1)}"></label>
     <p class="xs mu" style="margin-top:-6px">Conseil : pèse-toi le matin à jeun, après être allé aux toilettes, toujours dans les mêmes conditions.</p>
+    ${S.profile.compo ? compoPanel() : '<p class="xs mu">Balance avec graisse, muscle, eau… ? Active « Balance impédancemètre » dans Profil → Réglages.</p>'}
     ${scale('energie', 'Énergie cette semaine', 'À plat', 'En pleine forme')}
     ${scale('sommeil', 'Qualité du sommeil', 'Très mauvaise', 'Excellente')}
     ${scale('fatigue', 'Fatigue / courbatures', 'Aucune', 'Épuisé')}
@@ -2457,26 +2542,33 @@ function bilanDetail(b) {
   return sheetHead(b.kind === 'init' ? 'Point de départ' : 'Bilan', fmtDate(b.ts, 'long')) + `
     <div class="stats"><div class="stat"><b>${b.poids ? fmtNum(b.poids, 1) : '—'}</b><span>kg</span></div><div class="stat"><b>${b.poids ? fmtNum(imcOf(b.poids), 1) : '—'}</b><span>IMC</span></div><div class="stat"><b>${b.stats ? b.stats.days + '/' + b.stats.planned : '—'}</b><span>Jours actifs</span></div></div>
     ${b.kind !== 'init' ? `<p class="sm">Énergie <b>${b.energie}/5</b> · Sommeil <b>${b.sommeil}/5</b> · Fatigue <b>${b.fatigue}/5</b>${b.douleurs.length ? ` · Douleurs : <b>${b.douleurs.map(k => PAIN_ZONES[k]).join(', ')}</b>` : ''}</p>` : ''}
+    ${b.compo ? `<h4>Composition corporelle</h4><ul class="tips sm">${COMPO.filter(c => b.compo[c.k] > 0).map(c => `<li>${esc(c.n)} : <b>${fmtCompo(c, b.compo[c.k])}</b></li>`).join('')}</ul>` : ''}
     ${b.note ? `<p class="sm mu">${esc(b.note)}</p>` : ''}
     ${b.adapt ? `<ul class="tips sm">${b.adapt.msgs.map(m => `<li>${esc(m)}</li>`).join('')}</ul>` : ''}
     <button class="btn danger block" data-a="delBilan" data-id="${b.id}" style="margin-top:12px">Supprimer ce bilan</button>`;
 }
 
 /* ----- Progrès ----- */
+/* Courbe générique (poids, composition corporelle) — Gauthier Doumont */
+function lineChart(pts, o = {}) {
+  const W = 320, H = 150, L = 34, R = 10, T = 12, B = 24, pad = o.pad == null ? 1 : o.pad, span = o.span || 4, cible = o.cible;
+  const vals = pts.map(p => p.v).concat(cible ? [cible] : []);
+  let lo = Math.floor(Math.min(...vals) - pad), hi = Math.ceil(Math.max(...vals) + pad);
+  if (hi - lo < span) { const e = Math.ceil((span - (hi - lo)) / 2); hi += e; lo -= e; }
+  if (lo < 0 && Math.min(...vals) >= 0) { hi -= lo; lo = 0; }
+  const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts || t0 + 1;
+  const x = t => L + (W - L - R) * ((t - t0) / Math.max(1, t1 - t0)), y = v => T + (H - T - B) * (1 - (v - lo) / (hi - lo));
+  const line = pts.map(p => `${x(p.ts).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
+  const ticks = [...new Set([lo, Math.round((lo + hi) / 2), hi])].map(v => `<text x="${L - 6}" y="${y(v) + 3}" text-anchor="end">${v}</text><line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)"/>`).join('');
+  const tgt = cible && cible >= lo && cible <= hi ? `<line x1="${L}" x2="${W - R}" y1="${y(cible)}" y2="${y(cible)}" stroke="var(--ok)" stroke-dasharray="4 4"/><text x="${W - R}" y="${y(cible) - 4}" text-anchor="end" style="fill:var(--ok)">objectif</text>` : '';
+  const dots = pts.map((p, i) => `<circle cx="${x(p.ts)}" cy="${y(p.v)}" r="${i === pts.length - 1 ? 4.5 : 3}" fill="var(--ac)"/>`).join('');
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(o.label || 'Évolution')}">${ticks}${tgt}<polyline points="${line}" fill="none" stroke="var(--ac)" stroke-width="2.5" stroke-linejoin="round"/>${dots}
+    <text x="${L}" y="${H - 6}">${fmtDate(t0, 'short')}</text><text x="${W - R}" y="${H - 6}" text-anchor="end">${fmtDate(t1, 'short')}</text></svg>`;
+}
 function weightChart() {
   const pts = weighed().slice(-20); const cible = +S.profile.poidsCible;
   if (pts.length < 2) return `<p class="empty sm">La courbe apparaîtra après ton premier bilan hebdomadaire.</p>`;
-  const W = 320, H = 150, L = 34, R = 10, T = 12, B = 24;
-  const vals = pts.map(p => p.poids).concat(cible && Math.abs(cible - pts[pts.length - 1].poids) < 15 ? [cible] : []);
-  let lo = Math.floor(Math.min(...vals) - 1), hi = Math.ceil(Math.max(...vals) + 1); if (hi - lo < 4) { hi += 2; lo -= 2; }
-  const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts || t0 + 1;
-  const x = t => L + (W - L - R) * ((t - t0) / Math.max(1, t1 - t0)), y = v => T + (H - T - B) * (1 - (v - lo) / (hi - lo));
-  const line = pts.map(p => `${x(p.ts).toFixed(1)},${y(p.poids).toFixed(1)}`).join(' ');
-  const ticks = [lo, Math.round((lo + hi) / 2), hi].map(v => `<text x="${L - 6}" y="${y(v) + 3}" text-anchor="end">${v}</text><line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)"/>`).join('');
-  const tgt = cible && cible >= lo && cible <= hi ? `<line x1="${L}" x2="${W - R}" y1="${y(cible)}" y2="${y(cible)}" stroke="var(--ok)" stroke-dasharray="4 4"/><text x="${W - R}" y="${y(cible) - 4}" text-anchor="end" style="fill:var(--ok)">objectif</text>` : '';
-  const dots = pts.map((p, i) => `<circle cx="${x(p.ts)}" cy="${y(p.poids)}" r="${i === pts.length - 1 ? 4.5 : 3}" fill="var(--ac)"/>`).join('');
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Évolution du poids">${ticks}${tgt}<polyline points="${line}" fill="none" stroke="var(--ac)" stroke-width="2.5" stroke-linejoin="round"/>${dots}
-    <text x="${L}" y="${H - 6}">${fmtDate(t0, 'short')}</text><text x="${W - R}" y="${H - 6}" text-anchor="end">${fmtDate(t1, 'short')}</text></svg>`;
+  return lineChart(pts.map(p => ({ ts: p.ts, v: p.poids })), { cible: cible && Math.abs(cible - pts[pts.length - 1].poids) < 15 ? cible : 0, label: 'Évolution du poids' });
 }
 function viewProg() {
   const P = S.profile, w = weighed(), cur = w.length ? w[w.length - 1].poids : +P.poids, first = w[0];
@@ -2490,6 +2582,7 @@ function viewProg() {
     <div class="card"><div class="row sb"><b>Poids</b>${P.poidsCible ? `<span class="xs mu">objectif ${fmtNum(P.poidsCible, 1)} kg${cur ? ` · reste ${fmtNum(Math.abs(cur - P.poidsCible), 1)} kg` : ''}</span>` : ''}</div>${weightChart()}
       <button class="btn ${bilanDue() ? 'primary' : ''} block" data-a="bilan" style="margin-top:10px">⚖️ Faire mon bilan${bilanDue() ? '' : ' maintenant'}</button>
       <p class="xs mu" style="text-align:center">Prochain bilan prévu : ${fmtDate(bilanDue() ? lastBilanDay() : nextBilanDay(), 'long')}</p></div>
+    ${compoCard()}
     <div class="card"><h3>Corpulence (IMC)</h3><p><b class="${cat.c === 'ok' ? 'okc' : cat.c === 'bad' ? 'badc' : ''}">${v ? fmtNum(v, 1) : '—'}</b> · ${esc(cat.n)}</p>
       <p class="xs mu">L’IMC est un repère général : il ne distingue pas muscle et graisse et est moins précis après 65 ans ou chez les sportifs musclés. Le tour de taille et ta forme au quotidien comptent autant.</p></div>
     ${cal ? `<div class="card"><h3>Besoins caloriques (estimation)</h3>
@@ -2580,6 +2673,7 @@ function viewProfile() {
       <div class="seg" role="group" aria-label="Thème"><button class="${P.theme !== 'light' ? 'on' : ''}" data-a="theme" data-v="dark">🌙 Sombre</button><button class="${P.theme === 'light' ? 'on' : ''}" data-a="theme" data-v="light">☀️ Clair</button></div>
       <label class="sw-row" style="margin-top:8px"><span class="sw"><input type="checkbox" data-c="prof" data-f="son"${P.son ? ' checked' : ''}><i></i></span><span class="grow">Bips (repos, cardio guidé)</span></label>
       <label class="sw-row"><span class="sw"><input type="checkbox" data-c="prof" data-f="vibration"${P.vibration ? ' checked' : ''}><i></i></span><span class="grow">Vibrations</span></label>
+      <label class="sw-row"><span class="sw"><input type="checkbox" data-c="prof" data-f="compo"${P.compo ? ' checked' : ''}><i></i></span><span class="grow">Balance impédancemètre<br><span class="xs mu">Ajoute au bilan hebdo : graisse, graisse sous-cutanée et viscérale, eau, muscle, os, âge métabolique. Tous les champs restent facultatifs ; décoché = simple pesée.</span></span></label>
     </div>
     <div class="card"><h3>Sauvegarde</h3><p class="sm mu">Tes données restent uniquement sur ce téléphone. Dernier export : ${S.meta.lastExport ? fmtDate(S.meta.lastExport, 'full') + ' (' + daysAgo(S.meta.lastExport) + ')' : 'jamais'}.</p>
       <div class="row2"><button class="btn primary" data-a="export">⬇ Exporter</button><label class="btn" style="position:relative;overflow:hidden">⬆ Importer<input type="file" accept=".json,application/json" data-c="importFile" style="position:absolute;inset:0;opacity:0;cursor:pointer" aria-label="Importer une sauvegarde"></label></div></div>
@@ -2800,7 +2894,9 @@ const A = {
   saveBilan: async () => {
     const poids = parseNum($('#bPoids').value), D = S.bdraft;
     if (poids && !(poids > 25 && poids < 350)) { toast('Poids invalide'); return; }
+    const rc = S.profile.compo ? readCompo() : { compo: null }; if (rc.err) { toast(rc.err); return; }
     const b = { id: uid(), kind: 'semaine', ts: Date.now(), date: ymd(new Date()), poids: poids || 0, energie: D.energie, sommeil: D.sommeil, fatigue: D.fatigue, douleurs: D.douleurs.slice(), note: $('#bNote').value.trim() };
+    if (rc.compo) b.compo = rc.compo;
     b.stats = weekStats(Date.now());
     S.bilans.push(b);
     const ad = computeAdapt(b, b.stats); b.adapt = { delta: ad.delta, lvl: ad.lvl, msgs: ad.msgs, levelUp: ad.levelUp };
@@ -2810,6 +2906,7 @@ const A = {
     await DB.put('bilans', b); await saveKV('adapt'); S.preview = null;
     closeAllSheets(); render(); openSheet(bilanResult(b));
   },
+  compoTab: el => { S.compoTab = el.dataset.k; reRender(); },
   openBilan: el => { const b = S.bilans.find(x => x.id === el.dataset.id); if (b) openSheet(bilanDetail(b)); },
   delBilan: async el => { const id = el.dataset.id; closeAllSheets(); if (!(await ask('Supprimer ce bilan ?', 'Action définitive.', 'Supprimer', true))) return; await DB.del('bilans', id); S.bilans = S.bilans.filter(x => x.id !== id); render(); },
   levelUp: async () => { S.profile.niveau = Math.min(3, +S.profile.niveau + 1); S.adapt.lvl = 0; await saveKV('profile'); await saveKV('adapt'); closeAllSheets(); render(); toast(`Niveau ${LEVELS[S.profile.niveau]} 💪`); },
