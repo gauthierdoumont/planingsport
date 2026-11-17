@@ -2,8 +2,8 @@
    Créé par Gauthier Doumont.
    Pour publier une mise à jour : modifie index.html puis change le numéro de CACHE ci-dessous.
    Les données (IndexedDB) ne sont jamais touchées par le cache. */
-const CACHE = 'planning-sport-v1.0.0';
-const FILES = ['./', './index.html', './manifest.json', './icon.svg', './icon-192.png', './icon-512.png'];
+const CACHE = 'planning-sport-v1.1.0';
+const FILES = ['./', './index.html', './consignes.js', './manifest.json', './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(
